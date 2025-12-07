@@ -2,6 +2,7 @@
 #include <Adafruit_FT6206.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h> 
+#include <ESP32Time.h>
 
 // TFT Pins for Nano ESP32
 // D11 -> MOSI
@@ -42,10 +43,10 @@ const uint16_t MIN_INTERVAL = 60;   // fast
 const uint16_t MAX_INTERVAL = 160;  // slow
 
 // --- Word/clock reveal parameters ---
-const char REVEAL_TEXT[]          = "12:00";
-const int  REVEAL_LENGTH          = sizeof(REVEAL_TEXT) - 1; // exclude null terminator
+const int  REVEAL_LENGTH          = 5;
 const uint16_t REVEAL_DURATION_MS = 3600; // <- doubled from 1800 (3.6 seconds)
 const int REVEAL_TEXT_SIZE        = 6;    // BIGGER text for the clock
+char revealText[REVEAL_LENGTH + 1] = "12:00";
 
 // Per-column state
 struct ColumnState {
@@ -67,6 +68,9 @@ uint16_t matrixTrailDim;
 uint16_t matrixTrailDark;
 uint16_t matrixBgColor;
 
+ESP32Time rtc;
+int lastDisplayedMinute = -1;
+
 struct ColorScheme {
   uint16_t head;
   uint16_t bright;
@@ -83,6 +87,13 @@ const int COLOR_TOGGLE_REGION_H = 60;
 const uint16_t COLOR_TOGGLE_DEBOUNCE_MS = 250;
 uint32_t lastColorToggleMs = 0;
 
+const int SETTINGS_TOGGLE_REGION_W = 60;
+const int SETTINGS_TOGGLE_REGION_H = 60;
+const uint16_t SETTINGS_TOGGLE_DEBOUNCE_MS = 250;
+uint32_t lastSettingsToggleMs = 0;
+const uint16_t SETTINGS_BUTTON_DEBOUNCE_MS = 200;
+uint32_t lastSettingsButtonMs = 0;
+
 // Reveal state
 struct Reveal {
   bool active;
@@ -92,6 +103,38 @@ struct Reveal {
 };
 
 Reveal reveal = { false, 0, 0, false };
+
+bool settingsActive = false;
+int settingsHour = 12;
+int settingsMinute = 0;
+
+struct ButtonRegion {
+  int x;
+  int y;
+  int w;
+  int h;
+};
+
+ButtonRegion hourUpButton = {0};
+ButtonRegion hourDownButton = {0};
+ButtonRegion minuteUpButton = {0};
+ButtonRegion minuteDownButton = {0};
+
+int settingsTimeDisplayX = 0;
+int settingsTimeDisplayY = 0;
+int settingsTimeDisplayW = 0;
+int settingsTimeDisplayH = 0;
+
+const int SETTINGS_PANEL_MARGIN = 10;
+const int SETTINGS_BUTTON_W = 80;
+const int SETTINGS_BUTTON_H = 40;
+const int SETTINGS_BUTTON_SPACING = 10;
+const int SETTINGS_LABEL_OFFSET = 15;
+const int SETTINGS_TIME_TEXT_SIZE = 3;
+const int SETTINGS_TITLE_TEXT_SIZE = 2;
+const int SETTINGS_TITLE_OFFSET_Y = 25;
+const int SETTINGS_BUTTON_VERTICAL_OFFSET = 10;
+const int SETTINGS_LABEL_OFFSET_ADJUST = 5;
 
 // Global reveal area bounds (calculated once)
 int revealAreaX, revealAreaY, revealAreaW, revealAreaH;
@@ -109,6 +152,18 @@ void initColorSchemes();
 void applyColorScheme(uint8_t index);
 void cycleColorScheme();
 bool isColorToggleTouch(int x, int y);
+bool isSettingsToggleTouch(int x, int y);
+void enterSettingsMenu();
+void exitSettingsMenu();
+void drawSettingsMenu();
+void startReveal(uint32_t now);
+void updateRevealTextFromClock();
+void checkMinuteTick();
+void handleSettingsTouch(int x, int y);
+void drawTimeAdjustControls();
+void updateSettingsTimeDisplay();
+void drawButton(int x, int y, int w, int h, const char *label);
+bool pointInRect(int x, int y, int rx, int ry, int rw, int rh);
 
 void setup() {
   Serial.begin(115200);
@@ -157,6 +212,9 @@ void setup() {
   initColorSchemes();
   applyColorScheme(0);
 
+  rtc.setTime(0, 0, 12, 1, 1, 2024);
+  updateRevealTextFromClock();
+
   // Seed RNG
   randomSeed(analogRead(A0));
 
@@ -167,6 +225,8 @@ void setup() {
   calcRevealArea();
 
   reveal.active = false;
+  lastDisplayedMinute = rtc.getMinute();
+  startReveal(millis());
 
   Serial.print("NUM_COLS = ");
   Serial.println(NUM_COLS);
@@ -178,6 +238,12 @@ void setup() {
 void loop() {
   // Handle touch eents 
   handleTouch();    
+
+  checkMinuteTick();
+
+  if (settingsActive) {
+    return;
+  }
 
   // Update rain characters
   updateMatrixRain(); // Normal falling rain
@@ -321,6 +387,169 @@ bool isColorToggleTouch(int x, int y) {
          (y >= (SCREEN_H - COLOR_TOGGLE_REGION_H));
 }
 
+bool isSettingsToggleTouch(int x, int y) {
+  return (x <= SETTINGS_TOGGLE_REGION_W) && (y <= SETTINGS_TOGGLE_REGION_H);
+}
+
+void enterSettingsMenu() {
+  settingsActive = true;
+  settingsHour = rtc.getHour(true);
+  settingsMinute = rtc.getMinute();
+  tft.fillScreen(matrixBgColor);
+  drawSettingsMenu();
+}
+
+void exitSettingsMenu() {
+  settingsActive = false;
+
+  int currentYear = rtc.getYear();
+  int currentMonth = rtc.getMonth() + 1;
+  int currentDay = rtc.getDay();
+  rtc.setTime(0, settingsMinute, settingsHour, currentDay, currentMonth, currentYear);
+  lastDisplayedMinute = settingsMinute;
+  updateRevealTextFromClock();
+
+  tft.fillScreen(matrixBgColor);
+  initColumns();
+  reveal.active = false;
+  reveal.needsDraw = false;
+  startReveal(millis());
+}
+
+void drawSettingsMenu() {
+  tft.setTextSize(SETTINGS_TITLE_TEXT_SIZE);
+  tft.setTextWrap(true);
+  tft.setTextColor(matrixTrailBright, matrixBgColor);
+
+  int panelX = SETTINGS_PANEL_MARGIN;
+  int panelY = SETTINGS_PANEL_MARGIN;
+  int panelW = SCREEN_W - (SETTINGS_PANEL_MARGIN * 2);
+  int panelH = SCREEN_H - (SETTINGS_PANEL_MARGIN * 2);
+
+  tft.drawRect(panelX, panelY, panelW, panelH, matrixTrailBright);
+  const char *title = "Current Time";
+  int titleWidth = strlen(title) * FONT_PIXEL_W * SETTINGS_TITLE_TEXT_SIZE;
+  int titleX = panelX + (panelW - titleWidth) / 2;
+  int titleY = panelY + SETTINGS_TITLE_OFFSET_Y;
+  tft.setCursor(titleX, titleY);
+  tft.println(title);
+
+  drawTimeAdjustControls();
+}
+
+void drawTimeAdjustControls() {
+  int panelX = SETTINGS_PANEL_MARGIN;
+  int panelY = SETTINGS_PANEL_MARGIN;
+  int panelW = SCREEN_W - (SETTINGS_PANEL_MARGIN * 2);
+
+  settingsTimeDisplayX = panelX + 20;
+  settingsTimeDisplayY = panelY + 65;
+  settingsTimeDisplayW = panelW - 40;
+  settingsTimeDisplayH = 60;
+
+  tft.drawRect(settingsTimeDisplayX, settingsTimeDisplayY, settingsTimeDisplayW, settingsTimeDisplayH, matrixTrailBright);
+  updateSettingsTimeDisplay();
+
+  int controlsTop = settingsTimeDisplayY + settingsTimeDisplayH + 30 + SETTINGS_LABEL_OFFSET_ADJUST;
+  int hourColumnX = panelX + 30;
+  int minuteColumnX = panelX + panelW - SETTINGS_BUTTON_W - 30;
+
+  tft.setTextSize(2);
+  const char *hourLabel = "Hour";
+  const char *minuteLabel = "Minute";
+  int hourLabelWidth = strlen(hourLabel) * FONT_PIXEL_W * 2;
+  int minuteLabelWidth = strlen(minuteLabel) * FONT_PIXEL_W * 2;
+  int hourLabelX = hourColumnX + (SETTINGS_BUTTON_W - hourLabelWidth) / 2;
+  int minuteLabelX = minuteColumnX + (SETTINGS_BUTTON_W - minuteLabelWidth) / 2;
+  int labelY = controlsTop - SETTINGS_LABEL_OFFSET;
+  tft.setCursor(hourLabelX, labelY);
+  tft.println(hourLabel);
+  tft.setCursor(minuteLabelX, labelY);
+  tft.println(minuteLabel);
+
+  int buttonTop = controlsTop + SETTINGS_BUTTON_VERTICAL_OFFSET + SETTINGS_LABEL_OFFSET_ADJUST;
+
+  hourUpButton = { hourColumnX, buttonTop, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
+  hourDownButton = { hourColumnX, buttonTop + SETTINGS_BUTTON_H + SETTINGS_BUTTON_SPACING, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
+
+  minuteUpButton = { minuteColumnX, buttonTop, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
+  minuteDownButton = { minuteColumnX, buttonTop + SETTINGS_BUTTON_H + SETTINGS_BUTTON_SPACING, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
+
+  drawButton(hourUpButton.x, hourUpButton.y, hourUpButton.w, hourUpButton.h, "+");
+  drawButton(hourDownButton.x, hourDownButton.y, hourDownButton.w, hourDownButton.h, "-");
+  drawButton(minuteUpButton.x, minuteUpButton.y, minuteUpButton.w, minuteUpButton.h, "+");
+  drawButton(minuteDownButton.x, minuteDownButton.y, minuteDownButton.w, minuteDownButton.h, "-");
+}
+
+void updateSettingsTimeDisplay() {
+  if (settingsTimeDisplayW == 0 || settingsTimeDisplayH == 0) {
+    return;
+  }
+
+  tft.fillRect(settingsTimeDisplayX + 1, settingsTimeDisplayY + 1,
+               settingsTimeDisplayW - 2, settingsTimeDisplayH - 2, matrixBgColor);
+
+  char buffer[6];
+  snprintf(buffer, sizeof(buffer), "%02d:%02d", settingsHour, settingsMinute);
+
+  int textWidth = strlen(buffer) * FONT_PIXEL_W * SETTINGS_TIME_TEXT_SIZE;
+  int textHeight = FONT_PIXEL_H * SETTINGS_TIME_TEXT_SIZE;
+  int cursorX = settingsTimeDisplayX + (settingsTimeDisplayW - textWidth) / 2;
+  int cursorY = settingsTimeDisplayY + (settingsTimeDisplayH - textHeight) / 2;
+
+  tft.setTextSize(SETTINGS_TIME_TEXT_SIZE);
+  tft.setTextColor(matrixTrailBright, matrixBgColor);
+  tft.setCursor(cursorX, cursorY);
+  tft.print(buffer);
+}
+
+void drawButton(int x, int y, int w, int h, const char *label) {
+  tft.drawRect(x, y, w, h, matrixTrailBright);
+  tft.fillRect(x + 1, y + 1, w - 2, h - 2, matrixBgColor);
+  int textWidth = strlen(label) * FONT_PIXEL_W * 2;
+  int textHeight = FONT_PIXEL_H * 2;
+  int cursorX = x + (w - textWidth) / 2;
+  int cursorY = y + (h - textHeight) / 2;
+  tft.setTextSize(2);
+  tft.setTextColor(matrixTrailBright, matrixBgColor);
+  tft.setCursor(cursorX, cursorY);
+  tft.print(label);
+}
+
+bool pointInRect(int x, int y, int rx, int ry, int rw, int rh) {
+  return (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh);
+}
+
+void handleSettingsTouch(int x, int y) {
+  uint32_t now = millis();
+  if (now - lastSettingsButtonMs < SETTINGS_BUTTON_DEBOUNCE_MS) {
+    return;
+  }
+
+  bool updated = false;
+
+  if (pointInRect(x, y, hourUpButton.x, hourUpButton.y, hourUpButton.w, hourUpButton.h)) {
+    settingsHour = (settingsHour + 1) % 24;
+    updated = true;
+  } else if (pointInRect(x, y, hourDownButton.x, hourDownButton.y, hourDownButton.w, hourDownButton.h)) {
+    settingsHour = (settingsHour - 1);
+    if (settingsHour < 0) settingsHour = 23;
+    updated = true;
+  } else if (pointInRect(x, y, minuteUpButton.x, minuteUpButton.y, minuteUpButton.w, minuteUpButton.h)) {
+    settingsMinute = (settingsMinute + 1) % 60;
+    updated = true;
+  } else if (pointInRect(x, y, minuteDownButton.x, minuteDownButton.y, minuteDownButton.w, minuteDownButton.h)) {
+    settingsMinute = (settingsMinute - 1);
+    if (settingsMinute < 0) settingsMinute = 59;
+    updated = true;
+  }
+
+  if (updated) {
+    updateSettingsTimeDisplay();
+    lastSettingsButtonMs = now;
+  }
+}
+
 // Helper to check if a rain cell overlaps the reveal text box
 bool isRevealArea(int col, int y, int h) {
   if (!reveal.active) return false;
@@ -459,10 +688,32 @@ void handleTouch() {
   // Get current time
   uint32_t now = millis();
 
-  // Calculate touch coordinates
+  // Get raw touch coordinates and corner case handling
   TS_Point p = ctp.getPoint();
+  if (p.x == 0 && p.y == 0) {
+    return;
+  }
+
+  // Map touch coordinates to the screen coordinates
   int touchX = map(p.x, 0, 240, 240, 0); 
   int touchY = map(p.y, 0, 320, 320, 0);
+
+  if (isSettingsToggleTouch(touchX, touchY)) {
+    if (now - lastSettingsToggleMs > SETTINGS_TOGGLE_DEBOUNCE_MS) {
+      if (!settingsActive) {
+        enterSettingsMenu();
+      } else {
+        exitSettingsMenu();
+      }
+      lastSettingsToggleMs = now;
+    }
+    return;
+  }
+
+  if (settingsActive) {
+    handleSettingsTouch(touchX, touchY);
+    return;
+  }
 
   // Toggle color scheme if touch is in the color toggle region
   if (isColorToggleTouch(touchX, touchY)) {
@@ -473,17 +724,8 @@ void handleTouch() {
     return;
   }
 
-  // If reveal is starting fresh, clear the keep-out area immediately
-  if (!reveal.active) {
-    // Erase existing rain in the box using pre-calculated values
-    tft.fillRect(revealAreaX, revealAreaY, revealAreaW, revealAreaH, matrixBgColor);
-  }
-
-  // Start or refresh the reveal timer
-  reveal.active  = true;
-  reveal.startMs = now;
-  reveal.endMs   = now + REVEAL_DURATION_MS;
-  reveal.needsDraw = true;
+  updateRevealTextFromClock();
+  startReveal(now);
 }
 
 void updateReveal() {
@@ -510,5 +752,36 @@ void updateReveal() {
   tft.setTextWrap(false);
   tft.setCursor(revealAreaX, textY);
   tft.setTextColor(matrixTrailBright, matrixBgColor);
-  tft.print(REVEAL_TEXT);
+  tft.print(revealText);
+}
+
+void startReveal(uint32_t now) {
+  if (!reveal.active) {
+    tft.fillRect(revealAreaX, revealAreaY, revealAreaW, revealAreaH, matrixBgColor);
+  }
+
+  reveal.active = true;
+  reveal.startMs = now;
+  reveal.endMs = now + REVEAL_DURATION_MS;
+  reveal.needsDraw = true;
+}
+
+void updateRevealTextFromClock() {
+  int hour = rtc.getHour(true);
+  int minute = rtc.getMinute();
+  if (hour == 0) {
+    hour = 12;
+  }
+  snprintf(revealText, sizeof(revealText), "%02d:%02d", hour, minute);
+}
+
+void checkMinuteTick() {
+  int currentMinute = rtc.getMinute();
+  if (currentMinute == lastDisplayedMinute) {
+    return;
+  }
+
+  lastDisplayedMinute = currentMinute;
+  updateRevealTextFromClock();
+  startReveal(millis());
 }
