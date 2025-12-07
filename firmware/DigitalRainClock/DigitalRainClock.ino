@@ -25,8 +25,10 @@ const int SCREEN_H = 320;  // ILI9341 default height (portrait)
 const int TEXT_SCALE = 1;
 
 // Built-in 5x7 font is effectively ~6x8 per character with spacing
-const int CHAR_W = 6 * TEXT_SCALE;
-const int CHAR_H = 8 * TEXT_SCALE;
+const int FONT_PIXEL_W = 6;
+const int FONT_PIXEL_H = 8;
+const int CHAR_W = FONT_PIXEL_W * TEXT_SCALE;
+const int CHAR_H = FONT_PIXEL_H * TEXT_SCALE;
 
 const int NUM_COLS = SCREEN_W / CHAR_W;
 const int NUM_ROWS = SCREEN_H / CHAR_H;
@@ -65,14 +67,31 @@ uint16_t matrixTrailDim;
 uint16_t matrixTrailDark;
 uint16_t matrixBgColor;
 
+struct ColorScheme {
+  uint16_t head;
+  uint16_t bright;
+  uint16_t dim;
+  uint16_t dark;
+};
+
+const uint8_t NUM_COLOR_SCHEMES = 5;
+ColorScheme colorSchemes[NUM_COLOR_SCHEMES];
+uint8_t currentColorScheme = 0;
+
+const int COLOR_TOGGLE_REGION_W = 60;
+const int COLOR_TOGGLE_REGION_H = 60;
+const uint16_t COLOR_TOGGLE_DEBOUNCE_MS = 250;
+uint32_t lastColorToggleMs = 0;
+
 // Reveal state
 struct Reveal {
   bool active;
   uint32_t startMs;
   uint32_t endMs;
+  bool needsDraw;
 };
 
-Reveal reveal = { false, 0, 0 };
+Reveal reveal = { false, 0, 0, false };
 
 // Global reveal area bounds (calculated once)
 int revealAreaX, revealAreaY, revealAreaW, revealAreaH;
@@ -86,6 +105,10 @@ void handleTouch();
 void updateReveal();
 void calcRevealArea();
 void drawRainChar(int x, int row, char ch, uint16_t color); // New helper
+void initColorSchemes();
+void applyColorScheme(uint8_t index);
+void cycleColorScheme();
+bool isColorToggleTouch(int x, int y);
 
 void setup() {
   Serial.begin(115200);
@@ -129,12 +152,10 @@ void setup() {
   tft.setTextSize(TEXT_SCALE);
   tft.setTextWrap(false);
 
-  // Colors for rain (head + two trail levels)
-  matrixHeadColor    = ILI9341_WHITE;
-  matrixTrailBright  = ILI9341_GREEN;
-  matrixTrailDim     = ILI9341_DARKGREEN;
-  matrixTrailDark = tft.color565(0, 70, 0);
+  // Colors for rain (head + trail levels)
   matrixBgColor = ILI9341_BLACK;
+  initColorSchemes();
+  applyColorScheme(0);
 
   // Seed RNG
   randomSeed(analogRead(A0));
@@ -155,12 +176,16 @@ void setup() {
 }
 
 void loop() {
-  handleTouch();      // Touch triggers reveal
+  // Handle touch eents 
+  handleTouch();    
+
+  // Update rain characters
   updateMatrixRain(); // Normal falling rain
-  updateReveal();     // Overlay "12:00" if active
+
+  // Update displayed time
+  updateReveal(); 
 }
 
-// ------------------- Matrix Rain Logic -------------------
 
 void initColumns() {
   // Pre-fill glyphs
@@ -210,8 +235,8 @@ char randomGlyph() {
 
 // Calculate the reveal area once
 void calcRevealArea() {
-  int charPixelW = 6 * REVEAL_TEXT_SIZE;
-  int charPixelH = 8 * REVEAL_TEXT_SIZE;
+  int charPixelW = FONT_PIXEL_W * REVEAL_TEXT_SIZE;
+  int charPixelH = FONT_PIXEL_H * REVEAL_TEXT_SIZE;
   int textPixelW = REVEAL_LENGTH * charPixelW;
 
   // Calculate the padding size: 1 font-pixel row + 2 extra pixels
@@ -226,13 +251,74 @@ void calcRevealArea() {
   // Store globally
   revealAreaX = tx;
   revealAreaY = ty - vPad;
-  revealAreaW = textPixelW;
+  revealAreaW = textPixelW - 1;
   revealAreaH = charPixelH + vPad; 
 
   // Optimization: Calculate which columns intersect with this X-range
   // Column width is CHAR_W
   startRevealCol = revealAreaX / CHAR_W;
   endRevealCol   = (revealAreaX + revealAreaW) / CHAR_W;
+}
+
+void initColorSchemes() {
+  colorSchemes[0] = {
+    ILI9341_WHITE,
+    ILI9341_GREEN,
+    ILI9341_DARKGREEN,
+    tft.color565(0, 70, 0)
+  };
+
+  colorSchemes[1] = {
+    tft.color565(255, 220, 220),
+    ILI9341_RED,
+    tft.color565(120, 0, 0),
+    tft.color565(60, 0, 0)
+  };
+
+  colorSchemes[2] = {
+    tft.color565(220, 240, 255),
+    tft.color565(0, 180, 255),
+    tft.color565(0, 90, 170),
+    tft.color565(0, 40, 90)
+  };
+
+  colorSchemes[3] = {
+    tft.color565(255, 255, 210),
+    ILI9341_YELLOW,
+    tft.color565(180, 140, 0),
+    tft.color565(120, 90, 0)
+  };
+
+  colorSchemes[4] = {
+    tft.color565(240, 210, 255),
+    ILI9341_MAGENTA,
+    tft.color565(120, 0, 150),
+    tft.color565(70, 0, 90)
+  };
+}
+
+void applyColorScheme(uint8_t index) {
+  if (index >= NUM_COLOR_SCHEMES) {
+    index = 0;
+  }
+  currentColorScheme = index;
+  matrixHeadColor   = colorSchemes[index].head;
+  matrixTrailBright = colorSchemes[index].bright;
+  matrixTrailDim    = colorSchemes[index].dim;
+  matrixTrailDark   = colorSchemes[index].dark;
+}
+
+void cycleColorScheme() {
+  uint8_t next = (currentColorScheme + 1) % NUM_COLOR_SCHEMES;
+  applyColorScheme(next);
+  if (reveal.active) {
+    reveal.needsDraw = true;
+  }
+}
+
+bool isColorToggleTouch(int x, int y) {
+  return (x >= (SCREEN_W - COLOR_TOGGLE_REGION_W)) &&
+         (y >= (SCREEN_H - COLOR_TOGGLE_REGION_H));
 }
 
 // Helper to check if a rain cell overlaps the reveal text box
@@ -288,10 +374,14 @@ void updateMatrixRain() {
   for (int col = 0; col < NUM_COLS; col++) {
     ColumnState &c = columns[col];
 
-    if (now - c.lastUpdateMs < c.intervalMs) {
+    uint32_t elapsed = now - c.lastUpdateMs;
+    if (elapsed < c.intervalMs) {
       continue;  // not time to advance this column yet
     }
-    c.lastUpdateMs = now;
+    c.lastUpdateMs += c.intervalMs;
+    if (now - c.lastUpdateMs >= c.intervalMs) {
+      c.lastUpdateMs = now;
+    }
 
     int prevHead = c.headRow;
     c.headRow++;
@@ -361,15 +451,27 @@ void updateMatrixRain() {
 // ------------------- Touch & Reveal Logic -------------------
 
 void handleTouch() {
+  // Return if no touch detected
   if (!ctp.touched()) {
     return;
   }
 
+  // Get current time
   uint32_t now = millis();
 
-  // Read touch point just to clear it; we don't use x/y for now
+  // Calculate touch coordinates
   TS_Point p = ctp.getPoint();
-  (void)p; // suppress unused warning
+  int touchX = map(p.x, 0, 240, 240, 0); 
+  int touchY = map(p.y, 0, 320, 320, 0);
+
+  // Toggle color scheme if touch is in the color toggle region
+  if (isColorToggleTouch(touchX, touchY)) {
+    if (now - lastColorToggleMs > COLOR_TOGGLE_DEBOUNCE_MS) {
+      cycleColorScheme();
+      lastColorToggleMs = now;
+    }
+    return;
+  }
 
   // If reveal is starting fresh, clear the keep-out area immediately
   if (!reveal.active) {
@@ -381,6 +483,7 @@ void handleTouch() {
   reveal.active  = true;
   reveal.startMs = now;
   reveal.endMs   = now + REVEAL_DURATION_MS;
+  reveal.needsDraw = true;
 }
 
 void updateReveal() {
@@ -389,11 +492,14 @@ void updateReveal() {
   uint32_t now = millis();
   if (now > reveal.endMs) {
     reveal.active = false;
+    reveal.needsDraw = false;
     return;
   }
 
-  // Always white for the clock text
-  uint16_t color = ILI9341_WHITE;
+  if (!reveal.needsDraw) {
+    return;
+  }
+  reveal.needsDraw = false;
 
   // Recalculate Y position for text specifically since revealAreaY includes padding
   int vPad = (1 * REVEAL_TEXT_SIZE) + 2;
@@ -403,6 +509,6 @@ void updateReveal() {
   tft.setTextSize(REVEAL_TEXT_SIZE);
   tft.setTextWrap(false);
   tft.setCursor(revealAreaX, textY);
-  tft.setTextColor(ILI9341_GREEN, matrixBgColor);
+  tft.setTextColor(matrixTrailBright, matrixBgColor);
   tft.print(REVEAL_TEXT);
 }
