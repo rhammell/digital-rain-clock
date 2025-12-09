@@ -7,6 +7,8 @@
 // TFT Pins for Nano ESP32
 // D11 -> MOSI
 // D13 -> SCK
+// A4 -> SDA
+// A5 -> SCL
 #define TFT_DC   2
 #define TFT_RST  3
 #define TFT_CS   4
