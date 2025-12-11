@@ -1,2 +1,9 @@
 # macOS
 .DS_Store
+
+# FreeCAD automatic backup files
+*.FCStd1
+*.FCStd2
+*.FCStd3
+*.FCStd4
+*.FCBak
