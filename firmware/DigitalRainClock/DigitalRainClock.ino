@@ -12,7 +12,7 @@
 #define TFT_DC   2
 #define TFT_RST  3
 #define TFT_CS   4
-#define TFT_LED  20  // Backlight pin if you're controlling it from the Nano
+#define TFT_LED  5
 
 // Initialize the display object
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
@@ -20,59 +20,65 @@ Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 // Initialize the capacitive touchscreen object
 Adafruit_FT6206 ctp;
 
-// --- Matrix Digital Rain Parameters ---
-const int SCREEN_W = 240;  // ILI9341 default width (portrait)
-const int SCREEN_H = 320;  // ILI9341 default height (portrait)
+// Screen dimensions - portrait
+const int SCREEN_W = 320;
+const int SCREEN_H = 240;
 
-// Text scaling for the rain: 1 (many small columns)
+// Text scale
 const int TEXT_SCALE = 1;
 
-// Built-in 5x7 font is effectively ~6x8 per character with spacing
+// Font pixel width and height
 const int FONT_PIXEL_W = 6;
 const int FONT_PIXEL_H = 8;
 const int CHAR_W = FONT_PIXEL_W * TEXT_SCALE;
 const int CHAR_H = FONT_PIXEL_H * TEXT_SCALE;
 
+// Number of columns and rows
 const int NUM_COLS = SCREEN_W / CHAR_W;
 const int NUM_ROWS = SCREEN_H / CHAR_H;
 
-// Column-specific tail length range (in *rows*)
-const int MIN_TAIL_LEN = 14;   // <- updated
-const int MAX_TAIL_LEN = 20;   // <- updated
+// Column-specific tail length range (in rows)
+const int MIN_TAIL_LEN = 14;
+const int MAX_TAIL_LEN = 20;
 
 // Global speed range (ms per row step)
-const uint16_t MIN_INTERVAL = 60;   // fast
-const uint16_t MAX_INTERVAL = 160;  // slow
+const uint16_t MIN_INTERVAL = 60;
+const uint16_t MAX_INTERVAL = 160;
 
-// --- Word/clock reveal parameters ---
-const int  REVEAL_LENGTH          = 5;
-const uint16_t REVEAL_DURATION_MS = 3600; // <- doubled from 1800 (3.6 seconds)
-const int REVEAL_TEXT_SIZE        = 6;    // BIGGER text for the clock
-char revealText[REVEAL_LENGTH + 1] = "12:00";
+// Clock overlay parameters
+const int  TIME_TEXT_LENGTH          = 5;
+const uint16_t TIME_OVERLAY_DURATION_MS = 3600;
+const int TIME_TEXT_SIZE        = 6;
+char timeText[TIME_TEXT_LENGTH + 1] = "12:00";
 
-// Per-column state
+// Column state
 struct ColumnState {
-  int headRow;            // current head row (can be negative before entering screen)
-  uint16_t intervalMs;    // ms per row step
-  uint32_t lastUpdateMs;  // millis() when this column last updated
-  uint8_t tailLength;     // per-column tail length
+  int headRow;
+  uint16_t intervalMs;
+  uint32_t lastUpdateMs;
+  uint8_t tailLength;
 };
 
+// Array of column states
 ColumnState columns[NUM_COLS];
 
-// Character buffer so we can redraw trail characters
+// Character buffer for trail characters
 char glyphs[NUM_COLS][NUM_ROWS];
 
-// Colors
+// Colors for rain (head + trail levels) and background
 uint16_t matrixHeadColor;
 uint16_t matrixTrailBright;
 uint16_t matrixTrailDim;
 uint16_t matrixTrailDark;
 uint16_t matrixBgColor;
 
+// Real-time clock
 ESP32Time rtc;
+
+// Last displayed minute
 int lastDisplayedMinute = -1;
 
+// Color scheme struct
 struct ColorScheme {
   uint16_t head;
   uint16_t bright;
@@ -80,15 +86,22 @@ struct ColorScheme {
   uint16_t dark;
 };
 
+// Number of color schemes
 const uint8_t NUM_COLOR_SCHEMES = 5;
+
+// Array of color schemes
 ColorScheme colorSchemes[NUM_COLOR_SCHEMES];
+
+// Current color scheme
 uint8_t currentColorScheme = 0;
 
+// Color toggle region
 const int COLOR_TOGGLE_REGION_W = 60;
 const int COLOR_TOGGLE_REGION_H = 60;
 const uint16_t COLOR_TOGGLE_DEBOUNCE_MS = 250;
 uint32_t lastColorToggleMs = 0;
 
+// Settings toggle region
 const int SETTINGS_TOGGLE_REGION_W = 60;
 const int SETTINGS_TOGGLE_REGION_H = 60;
 const uint16_t SETTINGS_TOGGLE_DEBOUNCE_MS = 250;
@@ -96,20 +109,23 @@ uint32_t lastSettingsToggleMs = 0;
 const uint16_t SETTINGS_BUTTON_DEBOUNCE_MS = 200;
 uint32_t lastSettingsButtonMs = 0;
 
-// Reveal state
-struct Reveal {
+// Time overlay state struct
+struct TimeOverlay {
   bool active;
   uint32_t startMs;
   uint32_t endMs;
   bool needsDraw;
 };
 
-Reveal reveal = { false, 0, 0, false };
+// Time overlay struct
+TimeOverlay overlay = { false, 0, 0, false };
 
+// Settings menu state
 bool settingsActive = false;
 int settingsHour = 12;
 int settingsMinute = 0;
 
+// Button region struct
 struct ButtonRegion {
   int x;
   int y;
@@ -117,16 +133,19 @@ struct ButtonRegion {
   int h;
 };
 
+// Button regions
 ButtonRegion hourUpButton = {0};
 ButtonRegion hourDownButton = {0};
 ButtonRegion minuteUpButton = {0};
 ButtonRegion minuteDownButton = {0};
 
+// Settings time display region
 int settingsTimeDisplayX = 0;
 int settingsTimeDisplayY = 0;
 int settingsTimeDisplayW = 0;
 int settingsTimeDisplayH = 0;
 
+// Settings menu constants
 const int SETTINGS_PANEL_MARGIN = 10;
 const int SETTINGS_BUTTON_W = 80;
 const int SETTINGS_BUTTON_H = 40;
@@ -138,18 +157,19 @@ const int SETTINGS_TITLE_OFFSET_Y = 25;
 const int SETTINGS_BUTTON_VERTICAL_OFFSET = 10;
 const int SETTINGS_LABEL_OFFSET_ADJUST = 5;
 
-// Global reveal area bounds (calculated once)
-int revealAreaX, revealAreaY, revealAreaW, revealAreaH;
-int startRevealCol, endRevealCol; // Optimization: column range for reveal
+// Global overlay area bounds 
+int overlayAreaX, overlayAreaY, overlayAreaW, overlayAreaH;
+int startOverlayCol, endOverlayCol; 
 
+// Function prototypes
 char randomGlyph();
 void initColumns();
 void resetColumn(int col);
 void updateMatrixRain();
 void handleTouch();
-void updateReveal();
-void calcRevealArea();
-void drawRainChar(int x, int row, char ch, uint16_t color); // New helper
+void updateTimeOverlay();
+void calcTimeOverlayArea();
+void drawRainChar(int x, int row, char ch, uint16_t color);
 void initColorSchemes();
 void applyColorScheme(uint8_t index);
 void cycleColorScheme();
@@ -158,8 +178,8 @@ bool isSettingsToggleTouch(int x, int y);
 void enterSettingsMenu();
 void exitSettingsMenu();
 void drawSettingsMenu();
-void startReveal(uint32_t now);
-void updateRevealTextFromClock();
+void startTimeOverlay(uint32_t now);
+void updateTimeTextFromClock();
 void checkMinuteTick();
 void handleSettingsTouch(int x, int y);
 void drawTimeAdjustControls();
@@ -168,22 +188,22 @@ void drawButton(int x, int y, int w, int h, const char *label);
 bool pointInRect(int x, int y, int rx, int ry, int rw, int rh);
 
 void setup() {
+  // Initialize serial communication
   Serial.begin(115200);
   Serial.println("Starting TFT and Touch Initialization...");
  
-  // Backlight control (comment these out if your backlight is tied directly to 3.3V)
+  // Backlight control
   pinMode(TFT_LED, OUTPUT);
   digitalWrite(TFT_LED, HIGH);
 
-  // --- TFT Display Setup ---
+  // TFT Display Setup
   tft.begin();
   tft.fillScreen(ILI9341_BLACK);
 
-
-  // --- Touchscreen Setup (blocking with on-screen error) ---
+  // Touchscreen Setup
   if (!ctp.begin()) {
+    // Display error message if touchscreen initialization fails
     Serial.println("ERROR: Couldn't start FT6206 touchscreen controller.");
-
     tft.fillScreen(ILI9341_BLACK);
     tft.setTextSize(2);
     tft.setTextWrap(true);
@@ -201,60 +221,58 @@ void setup() {
       delay(1000);
     }
   }
-
   Serial.println("FT6206 touchscreen initialized successfully.");
 
-  // Set up text parameters for Matrix rain
+  // Set up text parameters for digital rain
   tft.fillScreen(ILI9341_BLACK);
   tft.setTextSize(TEXT_SCALE);
   tft.setTextWrap(false);
 
-  // Colors for rain (head + trail levels)
+  // Colors for digital rain (head + trail levels)
   matrixBgColor = ILI9341_BLACK;
   initColorSchemes();
   applyColorScheme(0);
 
+  // Set initial time
   rtc.setTime(0, 0, 12, 1, 1, 2024);
-  updateRevealTextFromClock();
+  updateTimeTextFromClock();
 
-  // Seed RNG
+  // Seed random number generator
   randomSeed(analogRead(A0));
 
-  // Initialize column states and glyphs
+  // Initialize digital rain column states and glyphs
   initColumns();
   
-  // Pre-calculate the reveal area dimensions
-  calcRevealArea();
+  // Pre-calculate the time overlay area dimensions
+  calcTimeOverlayArea();
 
-  reveal.active = false;
+  // Initialize time overlay
+  overlay.active = false;
   lastDisplayedMinute = rtc.getMinute();
-  startReveal(millis());
-
-  Serial.print("NUM_COLS = ");
-  Serial.println(NUM_COLS);
-  Serial.print("NUM_ROWS = ");
-  Serial.println(NUM_ROWS);
-  Serial.println("Initialization complete. Starting Matrix rain...");
+  startTimeOverlay(millis());
 }
 
 void loop() {
-  // Handle touch eents 
+  // Handle touch events 
   handleTouch();    
 
+  // Check if the minute has changed and update the time text if it has
   checkMinuteTick();
 
+  // If settings are active, do not update the time overlay
   if (settingsActive) {
     return;
   }
 
-  // Update rain characters
-  updateMatrixRain(); // Normal falling rain
+  // Update digital rain characters
+  updateMatrixRain();
 
-  // Update displayed time
-  updateReveal(); 
+  // Update time overlay
+  updateTimeOverlay(); 
 }
 
 
+// Initialize digital rain columns
 void initColumns() {
   // Pre-fill glyphs
   for (int col = 0; col < NUM_COLS; col++) {
@@ -271,64 +289,73 @@ void initColumns() {
   }
 }
 
-// Speed tied to tail length, using global MIN_INTERVAL / MAX_INTERVAL
+// Reset a digital rain column
 void resetColumn(int col) {
+  // Get the column state
   ColumnState &c = columns[col];
 
-  // Random tail length per column
+  // Generate a random tail length for the column
   c.tailLength = random(MIN_TAIL_LEN, MAX_TAIL_LEN + 1);  // inclusive range
 
-  // Map tail length to speed:
-  // - shorter tail => smaller interval => faster
-  // - longer tail  => larger interval  => slower
+  // Map tail length to speed: shorter tail => smaller interval => faster, longer tail => larger interval => slower
   int tailSpan = MAX_TAIL_LEN - MIN_TAIL_LEN;
-  if (tailSpan < 1) tailSpan = 1; // avoid division by zero
+  if (tailSpan < 1) tailSpan = 1; // Avoid division by zero
 
+  // Generate a base interval for the column
   uint16_t baseInterval = MIN_INTERVAL +
     (uint16_t)((long)(c.tailLength - MIN_TAIL_LEN) * (MAX_INTERVAL - MIN_INTERVAL) / tailSpan);
 
-  // Add a little jitter so similar tails aren't perfectly identical
+  // Add a little jitter so similar tails aren't perfectly identical to avoid repetition
   int16_t jitter = random(-15, 16); // -15 .. +15
   int32_t intervalWithJitter = (int32_t)baseInterval + jitter;
-  if (intervalWithJitter < 20) intervalWithJitter = 20; // clamp to sane min
+  if (intervalWithJitter < 20) intervalWithJitter = 20; // Clamp to sane minimum to avoid too fast falling
 
+  // Set the interval for the column
   c.intervalMs   = (uint16_t)intervalWithJitter;
+  c.lastUpdateMs = millis();
+
+  // Set the last update time for the column
   c.lastUpdateMs = millis();
 }
 
+// Generate a random glyph
 char randomGlyph() {
   // Random printable ASCII; tweak range if you want other characters
   return (char)random(33, 126); // '!' to '~'
 }
 
-// Calculate the reveal area once
-void calcRevealArea() {
-  int charPixelW = FONT_PIXEL_W * REVEAL_TEXT_SIZE;
-  int charPixelH = FONT_PIXEL_H * REVEAL_TEXT_SIZE;
-  int textPixelW = REVEAL_LENGTH * charPixelW;
+// Calculate the time overlay area once
+void calcTimeOverlayArea() {
+  int charPixelW = FONT_PIXEL_W * TIME_TEXT_SIZE;
+  int charPixelH = FONT_PIXEL_H * TIME_TEXT_SIZE;
+  int textPixelW = TIME_TEXT_LENGTH * charPixelW;
 
-  // Calculate the padding size: 1 font-pixel row + 2 extra pixels
-  int vPad = (1 * REVEAL_TEXT_SIZE) + 2;
+  // Calculate the padding size: 1 font-pixel row + 2 extra pixels to avoid text being cut off
+  int vPad = (1 * TIME_TEXT_SIZE) + 2;
 
+  // Calculate the x position of the time overlay
   int tx = (SCREEN_W - textPixelW) / 2;
   if (tx < 0) tx = 0;
   
+  // Calculate the y position of the time overlay
   int ty = (SCREEN_H - charPixelH) / 2;
   if (ty < 0) ty = 0;
 
-  // Store globally
-  revealAreaX = tx;
-  revealAreaY = ty - vPad;
-  revealAreaW = textPixelW - 1;
-  revealAreaH = charPixelH + vPad; 
+  // Store the time overlay area dimensions globally
+  overlayAreaX = tx;
+  overlayAreaY = ty - vPad;
+  overlayAreaW = textPixelW - 1;
+  overlayAreaH = charPixelH + vPad; 
 
-  // Optimization: Calculate which columns intersect with this X-range
+  // Calculate which columns intersect with this X-range for optimization
   // Column width is CHAR_W
-  startRevealCol = revealAreaX / CHAR_W;
-  endRevealCol   = (revealAreaX + revealAreaW) / CHAR_W;
+  startOverlayCol = overlayAreaX / CHAR_W;
+  endOverlayCol   = (overlayAreaX + overlayAreaW) / CHAR_W;
 }
 
+// Initialize color schemes
 void initColorSchemes() {
+  // Color scheme 0: Green
   colorSchemes[0] = {
     ILI9341_WHITE,
     ILI9341_GREEN,
@@ -336,6 +363,7 @@ void initColorSchemes() {
     tft.color565(0, 70, 0)
   };
 
+  // Color scheme 1: Red
   colorSchemes[1] = {
     tft.color565(255, 220, 220),
     ILI9341_RED,
@@ -343,6 +371,7 @@ void initColorSchemes() {
     tft.color565(60, 0, 0)
   };
 
+  // Color scheme 2: Blue
   colorSchemes[2] = {
     tft.color565(220, 240, 255),
     tft.color565(0, 180, 255),
@@ -350,6 +379,7 @@ void initColorSchemes() {
     tft.color565(0, 40, 90)
   };
 
+  // Color scheme 3: Yellow
   colorSchemes[3] = {
     tft.color565(255, 255, 210),
     ILI9341_YELLOW,
@@ -357,6 +387,7 @@ void initColorSchemes() {
     tft.color565(120, 90, 0)
   };
 
+  // Color scheme 4: Purple
   colorSchemes[4] = {
     tft.color565(240, 210, 255),
     ILI9341_MAGENTA,
@@ -365,34 +396,44 @@ void initColorSchemes() {
   };
 }
 
+// Apply a color scheme
 void applyColorScheme(uint8_t index) {
+  // If the index is out of bounds, set it to 0
   if (index >= NUM_COLOR_SCHEMES) {
     index = 0;
   }
+
+  // Set the current color scheme
   currentColorScheme = index;
+
+  // Set the color scheme colors to the global variables
   matrixHeadColor   = colorSchemes[index].head;
   matrixTrailBright = colorSchemes[index].bright;
   matrixTrailDim    = colorSchemes[index].dim;
   matrixTrailDark   = colorSchemes[index].dark;
 }
 
+// Cycle through the color schemes
 void cycleColorScheme() {
   uint8_t next = (currentColorScheme + 1) % NUM_COLOR_SCHEMES;
   applyColorScheme(next);
-  if (reveal.active) {
-    reveal.needsDraw = true;
+  if (overlay.active) {
+    overlay.needsDraw = true;
   }
 }
 
+// Check if the color toggle is touched
 bool isColorToggleTouch(int x, int y) {
   return (x >= (SCREEN_W - COLOR_TOGGLE_REGION_W)) &&
          (y >= (SCREEN_H - COLOR_TOGGLE_REGION_H));
 }
 
+// Check if the settings toggle is touched
 bool isSettingsToggleTouch(int x, int y) {
   return (x <= SETTINGS_TOGGLE_REGION_W) && (y <= SETTINGS_TOGGLE_REGION_H);
 }
 
+// Enter the settings menu
 void enterSettingsMenu() {
   settingsActive = true;
   settingsHour = rtc.getHour(true);
@@ -401,34 +442,50 @@ void enterSettingsMenu() {
   drawSettingsMenu();
 }
 
+// Exit the settings menu
 void exitSettingsMenu() {
+  // Set the settings active flag to false
   settingsActive = false;
 
+  // Get the current time
   int currentYear = rtc.getYear();
-  int currentMonth = rtc.getMonth() + 1;
+  int currentMonth = rtc.getMonth() + 1; // Month is 0-11, so add 1
   int currentDay = rtc.getDay();
+
+  // Set the time to the current time
   rtc.setTime(0, settingsMinute, settingsHour, currentDay, currentMonth, currentYear);
   lastDisplayedMinute = settingsMinute;
-  updateRevealTextFromClock();
+  updateTimeTextFromClock();
 
+  // Fill the screen with the background color
   tft.fillScreen(matrixBgColor);
   initColumns();
-  reveal.active = false;
-  reveal.needsDraw = false;
-  startReveal(millis());
+
+  // Reset the time overlay
+  overlay.active = false;
+  overlay.needsDraw = false;
+
+  // Start the time overlay
+  startTimeOverlay(millis());
 }
 
+// Draw the settings menu
 void drawSettingsMenu() {
+  // Set the text size and wrap and color
   tft.setTextSize(SETTINGS_TITLE_TEXT_SIZE);
   tft.setTextWrap(true);
   tft.setTextColor(matrixTrailBright, matrixBgColor);
 
+  // Calculate the panel x, y, width and height
   int panelX = SETTINGS_PANEL_MARGIN;
   int panelY = SETTINGS_PANEL_MARGIN;
   int panelW = SCREEN_W - (SETTINGS_PANEL_MARGIN * 2);
   int panelH = SCREEN_H - (SETTINGS_PANEL_MARGIN * 2);
 
+  // Draw the panel
   tft.drawRect(panelX, panelY, panelW, panelH, matrixTrailBright);
+
+  // Draw the title
   const char *title = "Current Time";
   int titleWidth = strlen(title) * FONT_PIXEL_W * SETTINGS_TITLE_TEXT_SIZE;
   int titleX = panelX + (panelW - titleWidth) / 2;
@@ -436,229 +493,293 @@ void drawSettingsMenu() {
   tft.setCursor(titleX, titleY);
   tft.println(title);
 
+  // Draw the time adjust controls
   drawTimeAdjustControls();
 }
 
+
+// Draw the time adjust controls
 void drawTimeAdjustControls() {
+  // Calculate the panel x, y, width and height
   int panelX = SETTINGS_PANEL_MARGIN;
   int panelY = SETTINGS_PANEL_MARGIN;
   int panelW = SCREEN_W - (SETTINGS_PANEL_MARGIN * 2);
 
+  // Calculate the time display x, y, width and height
   settingsTimeDisplayX = panelX + 20;
   settingsTimeDisplayY = panelY + 65;
   settingsTimeDisplayW = panelW - 40;
   settingsTimeDisplayH = 60;
 
+  // Draw the time display
   tft.drawRect(settingsTimeDisplayX, settingsTimeDisplayY, settingsTimeDisplayW, settingsTimeDisplayH, matrixTrailBright);
   updateSettingsTimeDisplay();
 
+  // Calculate the controls top
   int controlsTop = settingsTimeDisplayY + settingsTimeDisplayH + 30 + SETTINGS_LABEL_OFFSET_ADJUST;
+
+  // Calculate the hour column x and minute column x
   int hourColumnX = panelX + 30;
   int minuteColumnX = panelX + panelW - SETTINGS_BUTTON_W - 30;
 
+  // Set the text size
   tft.setTextSize(2);
+
+  // Draw the hour label and minute label
   const char *hourLabel = "Hour";
   const char *minuteLabel = "Minute";
   int hourLabelWidth = strlen(hourLabel) * FONT_PIXEL_W * 2;
   int minuteLabelWidth = strlen(minuteLabel) * FONT_PIXEL_W * 2;
+
+  // Calculate the hour label x and minute label x
   int hourLabelX = hourColumnX + (SETTINGS_BUTTON_W - hourLabelWidth) / 2;
   int minuteLabelX = minuteColumnX + (SETTINGS_BUTTON_W - minuteLabelWidth) / 2;
+
+  // Calculate the label y
   int labelY = controlsTop - SETTINGS_LABEL_OFFSET;
+
+  // Draw the hour label and minute label
   tft.setCursor(hourLabelX, labelY);
   tft.println(hourLabel);
   tft.setCursor(minuteLabelX, labelY);
   tft.println(minuteLabel);
 
+  // Calculate the button top
   int buttonTop = controlsTop + SETTINGS_BUTTON_VERTICAL_OFFSET + SETTINGS_LABEL_OFFSET_ADJUST;
 
+  // Calculate the hour up button x, y, width and height
   hourUpButton = { hourColumnX, buttonTop, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
   hourDownButton = { hourColumnX, buttonTop + SETTINGS_BUTTON_H + SETTINGS_BUTTON_SPACING, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
 
+  // Calculate the minute up button x, y, width and height
   minuteUpButton = { minuteColumnX, buttonTop, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
   minuteDownButton = { minuteColumnX, buttonTop + SETTINGS_BUTTON_H + SETTINGS_BUTTON_SPACING, SETTINGS_BUTTON_W, SETTINGS_BUTTON_H };
 
+  // Draw the hour up button, hour down button, minute up button and minute down button
   drawButton(hourUpButton.x, hourUpButton.y, hourUpButton.w, hourUpButton.h, "+");
   drawButton(hourDownButton.x, hourDownButton.y, hourDownButton.w, hourDownButton.h, "-");
   drawButton(minuteUpButton.x, minuteUpButton.y, minuteUpButton.w, minuteUpButton.h, "+");
   drawButton(minuteDownButton.x, minuteDownButton.y, minuteDownButton.w, minuteDownButton.h, "-");
 }
 
+// Update the settings time display
 void updateSettingsTimeDisplay() {
+  // If the time display width or height is 0, return
   if (settingsTimeDisplayW == 0 || settingsTimeDisplayH == 0) {
     return;
   }
 
+  // Fill the time display with the background color
   tft.fillRect(settingsTimeDisplayX + 1, settingsTimeDisplayY + 1,
                settingsTimeDisplayW - 2, settingsTimeDisplayH - 2, matrixBgColor);
 
+  // Create a buffer for the time display
   char buffer[6];
   snprintf(buffer, sizeof(buffer), "%02d:%02d", settingsHour, settingsMinute);
 
+  // Calculate the text width and height
   int textWidth = strlen(buffer) * FONT_PIXEL_W * SETTINGS_TIME_TEXT_SIZE;
   int textHeight = FONT_PIXEL_H * SETTINGS_TIME_TEXT_SIZE;
+
+  // Calculate the cursor x and y
   int cursorX = settingsTimeDisplayX + (settingsTimeDisplayW - textWidth) / 2;
   int cursorY = settingsTimeDisplayY + (settingsTimeDisplayH - textHeight) / 2;
 
+  // Set the text size and color
   tft.setTextSize(SETTINGS_TIME_TEXT_SIZE);
   tft.setTextColor(matrixTrailBright, matrixBgColor);
   tft.setCursor(cursorX, cursorY);
+
+  // Print the time display
   tft.print(buffer);
 }
 
+// Draw a button
 void drawButton(int x, int y, int w, int h, const char *label) {
+  // Draw the button rectangle with the trail bright color
   tft.drawRect(x, y, w, h, matrixTrailBright);
   tft.fillRect(x + 1, y + 1, w - 2, h - 2, matrixBgColor);
+
+  // Calculate the text width and height and cursor x and y
   int textWidth = strlen(label) * FONT_PIXEL_W * 2;
   int textHeight = FONT_PIXEL_H * 2;
   int cursorX = x + (w - textWidth) / 2;
   int cursorY = y + (h - textHeight) / 2;
+
+  // Draw button text
   tft.setTextSize(2);
   tft.setTextColor(matrixTrailBright, matrixBgColor);
   tft.setCursor(cursorX, cursorY);
   tft.print(label);
 }
 
+// Check if a point is in a rectangle
 bool pointInRect(int x, int y, int rx, int ry, int rw, int rh) {
   return (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh);
 }
 
+// Handle settings touch
 void handleSettingsTouch(int x, int y) {
+  // Get the current time
   uint32_t now = millis();
+
+  // If the last settings button press was less than the debounce time, return
   if (now - lastSettingsButtonMs < SETTINGS_BUTTON_DEBOUNCE_MS) {
     return;
   }
 
+  // Set the updated flag to false
   bool updated = false;
 
+  // Check if the touch is in the hour up button
   if (pointInRect(x, y, hourUpButton.x, hourUpButton.y, hourUpButton.w, hourUpButton.h)) {
+    // Increment the hour
     settingsHour = (settingsHour + 1) % 24;
     updated = true;
   } else if (pointInRect(x, y, hourDownButton.x, hourDownButton.y, hourDownButton.w, hourDownButton.h)) {
+    // Decrement the hour
     settingsHour = (settingsHour - 1);
     if (settingsHour < 0) settingsHour = 23;
     updated = true;
   } else if (pointInRect(x, y, minuteUpButton.x, minuteUpButton.y, minuteUpButton.w, minuteUpButton.h)) {
+    // Increment the minute
     settingsMinute = (settingsMinute + 1) % 60;
     updated = true;
   } else if (pointInRect(x, y, minuteDownButton.x, minuteDownButton.y, minuteDownButton.w, minuteDownButton.h)) {
+    // Decrement the minute
     settingsMinute = (settingsMinute - 1);
     if (settingsMinute < 0) settingsMinute = 59;
     updated = true;
   }
 
+  // If the updated flag is true, update the settings time display and set the last settings button press time
   if (updated) {
     updateSettingsTimeDisplay();
     lastSettingsButtonMs = now;
   }
 }
 
-// Helper to check if a rain cell overlaps the reveal text box
-bool isRevealArea(int col, int y, int h) {
-  if (!reveal.active) return false;
+// Check if a rain cell overlaps the overlay text box
+bool isOverlayArea(int col, int y, int h) {
+  // If the overlay is not active, return false
+  if (!overlay.active) return false;
 
-  // 1. Fast Check: Is this column even near the text?
-  if (col < startRevealCol || col > endRevealCol) return false;
+  // Fast Check: Is this column even near the text?
+  if (col < startOverlayCol || col > endOverlayCol) return false;
 
-  // 2. Precise Check: Y-coordinate overlap
-  return (y < revealAreaY + revealAreaH && y + h > revealAreaY);
+  // Precise Check: Y-coordinate overlap
+  return (y < overlayAreaY + overlayAreaH && y + h > overlayAreaY);
 }
 
-// New helper to centralize drawing logic
+// Draw a rain character
 void drawRainChar(int col, int row, char ch, uint16_t color) {
-  // Boundary check
+  // If the row is out of bounds, return
   if (row < 0 || row >= NUM_ROWS) return;
 
+  // Calculate the x and y
   int x = col * CHAR_W;
   int y = row * CHAR_H;
 
-  // Check collision
-  if (isRevealArea(col, y, CHAR_H)) return;
+  // Check if the rain cell overlaps the overlay text box
+  if (isOverlayArea(col, y, CHAR_H)) return;
 
-  // Draw
+  // Draw the rain character
   tft.setCursor(x, y);
   tft.setTextColor(color, matrixBgColor);
   tft.write(ch);
 }
 
-// Overload for clearing (drawing a rectangle)
+// Clear a rain character
 void clearRainChar(int col, int row) {
-  // Boundary check
+  // If the row is out of bounds, return
   if (row < 0 || row >= NUM_ROWS) return;
 
+  // Calculate the x and y
   int x = col * CHAR_W;
   int y = row * CHAR_H;
 
-  // Check collision
-  if (isRevealArea(col, y, CHAR_H)) return;
+  // Check if the rain cell overlaps the overlay text box
+  if (isOverlayArea(col, y, CHAR_H)) return;
 
-  // Erase
+  // Clear the rain character
   tft.fillRect(x, y, CHAR_W, CHAR_H, matrixBgColor);
 }
 
+// Update the matrix rain
 void updateMatrixRain() {
+  // Get the current time
   uint32_t now = millis();
 
-  // Ensure rain always uses the small text size
+  // Set the text size to the small text size
   tft.setTextSize(TEXT_SCALE);
   tft.setTextWrap(false);
 
+  // Update each column
   for (int col = 0; col < NUM_COLS; col++) {
+    // Get the column state
     ColumnState &c = columns[col];
 
+    // Calculate the elapsed time since the last update
     uint32_t elapsed = now - c.lastUpdateMs;
     if (elapsed < c.intervalMs) {
-      continue;  // not time to advance this column yet
+      // Not time to advance this column yet, continue
+      continue;
     }
+
+    // Update the last update time
     c.lastUpdateMs += c.intervalMs;
+
+    // If the last update time is greater than the interval, set it to the current time
     if (now - c.lastUpdateMs >= c.intervalMs) {
       c.lastUpdateMs = now;
     }
 
+    // Get the previous head row
     int prevHead = c.headRow;
     c.headRow++;
 
+    // Get the tail length
     int tailLen = c.tailLength;
 
     // When the entire stream (head + tail) has passed off-screen, respawn
     if (c.headRow >= NUM_ROWS + tailLen) {
       // Reset this column with a new tail length and speed
       resetColumn(col);
-      // Start above the screen again
+      // Set the head row to a random row above the screen
       c.headRow = random(-NUM_ROWS, 0);
-
-      // Use new tailLen after reset
+      // Use the new tail length
       tailLen = c.tailLength;
     }
 
-    // --- 1) Erase tail end cell ---
+    // Erase the tail end cell
     clearRainChar(col, c.headRow - tailLen);
 
-    // --- 2) Draw new head (white) ---
+    // Draw the new head (white)
     if (c.headRow >= 0 && c.headRow < NUM_ROWS) {
       char ch = randomGlyph();
+      // Set the glyph for the head
       glyphs[col][c.headRow] = ch;
+      // Draw the head
       drawRainChar(col, c.headRow, ch, matrixHeadColor);
     }
 
-    // --- 3) Previous head becomes bright trail ---
+    // The previous head becomes bright trail
     if (prevHead >= 0 && prevHead < NUM_ROWS) {
       char ch = glyphs[col][prevHead];
       drawRainChar(col, prevHead, ch, matrixTrailBright);
     }
 
-    // --- 4) Tail fade: bright -> dim -> dark -> cleared
-
-    // Bright region length = 20% of tail
+    // Calculate the bright region length 
     int brightDist = tailLen / 5;      // ~20%
     if (brightDist < 1) brightDist = 1;
     if (brightDist >= tailLen) brightDist = tailLen - 1;
 
-    // Dark region starts at 80% of tail
+    // Calculate the dark region start distance
     int darkStartDist = (tailLen * 4) / 5;  // ~80%
     if (darkStartDist <= brightDist + 1) darkStartDist = brightDist + 2;
     if (darkStartDist >= tailLen) darkStartDist = tailLen - 1;
 
-    // (a) Cell leaving the bright zone becomes *dim* trail
+    // Cell leaving the bright zone becomes a dim trail
     int dimRow = c.headRow - (brightDist + 1);
     if (dimRow >= 0 && dimRow < NUM_ROWS) {
       int dist = c.headRow - dimRow;
@@ -667,7 +788,7 @@ void updateMatrixRain() {
       }
     }
 
-    // (b) Cell entering the last 20% of the tail becomes *dark* trail
+    // Cell entering the last 20% of the tail becomes a dark trail
     int darkRow = c.headRow - darkStartDist;
     if (darkRow >= 0 && darkRow < NUM_ROWS) {
       int dist = c.headRow - darkRow;
@@ -679,19 +800,21 @@ void updateMatrixRain() {
 }
 
 
-// ------------------- Touch & Reveal Logic -------------------
-
+// Handle touch
 void handleTouch() {
+  // If no touch detected, return
   // Return if no touch detected
   if (!ctp.touched()) {
     return;
   }
 
-  // Get current time
+  // Get the current time
   uint32_t now = millis();
 
-  // Get raw touch coordinates and corner case handling
+  // Get the raw touch coordinates and corner case handling
   TS_Point p = ctp.getPoint();
+
+  // If the touch coordinates are 0, return
   if (p.x == 0 && p.y == 0) {
     return;
   }
@@ -700,8 +823,11 @@ void handleTouch() {
   int touchX = map(p.x, 0, 240, 240, 0); 
   int touchY = map(p.y, 0, 320, 320, 0);
 
+  // Check if the touch is in the settings toggle region and if the last settings toggle press was less than the debounce time
   if (isSettingsToggleTouch(touchX, touchY)) {
+    // If the last settings toggle press was less than the debounce time, return
     if (now - lastSettingsToggleMs > SETTINGS_TOGGLE_DEBOUNCE_MS) {
+      // If the settings menu is not active, enter the settings menu
       if (!settingsActive) {
         enterSettingsMenu();
       } else {
@@ -712,12 +838,13 @@ void handleTouch() {
     return;
   }
 
+  // If the settings menu is active, handle the settings touch
   if (settingsActive) {
     handleSettingsTouch(touchX, touchY);
     return;
   }
 
-  // Toggle color scheme if touch is in the color toggle region
+  // Toggle color scheme if touch is in the color toggle region and if the last color toggle press was less than the debounce time
   if (isColorToggleTouch(touchX, touchY)) {
     if (now - lastColorToggleMs > COLOR_TOGGLE_DEBOUNCE_MS) {
       cycleColorScheme();
@@ -726,64 +853,89 @@ void handleTouch() {
     return;
   }
 
-  updateRevealTextFromClock();
-  startReveal(now);
+  // Update the time text from the clock
+  updateTimeTextFromClock();
+  startTimeOverlay(now);
 }
 
-void updateReveal() {
-  if (!reveal.active) return;
+// Update the time overlay
+void updateTimeOverlay() {
+  // If the overlay is not active, return
+  if (!overlay.active) return;
 
+  // Get the current time
   uint32_t now = millis();
-  if (now > reveal.endMs) {
-    reveal.active = false;
-    reveal.needsDraw = false;
+
+  // If the current time is greater than the end time, deactivate the overlay and set the needs draw flag to false
+  if (now > overlay.endMs) {
+    overlay.active = false;
+    overlay.needsDraw = false;
     return;
   }
 
-  if (!reveal.needsDraw) {
+  // If the needs draw flag is false, return
+  if (!overlay.needsDraw) {
     return;
   }
-  reveal.needsDraw = false;
 
-  // Recalculate Y position for text specifically since revealAreaY includes padding
-  int vPad = (1 * REVEAL_TEXT_SIZE) + 2;
-  int textY = revealAreaY + vPad;
+  // Set the needs draw flag to false
+  overlay.needsDraw = false;
 
-  // Draw big "12:00" in the center
-  tft.setTextSize(REVEAL_TEXT_SIZE);
+  // Recalculate the Y position for text specifically since overlayAreaY includes padding
+  int vPad = (1 * TIME_TEXT_SIZE) + 2;
+  int textY = overlayAreaY + vPad;
+
+  // Draw the time text in the center
+  tft.setTextSize(TIME_TEXT_SIZE);
   tft.setTextWrap(false);
-  tft.setCursor(revealAreaX, textY);
+  tft.setCursor(overlayAreaX, textY);
   tft.setTextColor(matrixTrailBright, matrixBgColor);
-  tft.print(revealText);
+  tft.print(timeText);
 }
 
-void startReveal(uint32_t now) {
-  if (!reveal.active) {
-    tft.fillRect(revealAreaX, revealAreaY, revealAreaW, revealAreaH, matrixBgColor);
+// Start the time overlay
+void startTimeOverlay(uint32_t now) {
+  // If the overlay is not active, fill the overlay area with the background color
+  if (!overlay.active) {
+    tft.fillRect(overlayAreaX, overlayAreaY, overlayAreaW, overlayAreaH, matrixBgColor);
   }
 
-  reveal.active = true;
-  reveal.startMs = now;
-  reveal.endMs = now + REVEAL_DURATION_MS;
-  reveal.needsDraw = true;
+  // Update the overlay state
+  overlay.active = true;
+  overlay.startMs = now;
+  overlay.endMs = now + TIME_OVERLAY_DURATION_MS;
+  overlay.needsDraw = true;
 }
 
-void updateRevealTextFromClock() {
+// Update the time text from the clock
+void updateTimeTextFromClock() {
+  // Get the current hour and minute
   int hour = rtc.getHour(true);
   int minute = rtc.getMinute();
   if (hour == 0) {
     hour = 12;
   }
-  snprintf(revealText, sizeof(revealText), "%02d:%02d", hour, minute);
+
+  // Format the time text
+  snprintf(timeText, sizeof(timeText), "%02d:%02d", hour, minute);
 }
 
+// Check if the minute has changed and update the time text if it has
 void checkMinuteTick() {
+  // Get the current minute
   int currentMinute = rtc.getMinute();
+
+  // If the current minute is the same as the last displayed minute, return
   if (currentMinute == lastDisplayedMinute) {
     return;
   }
 
+  // Update the last displayed minute
   lastDisplayedMinute = currentMinute;
-  updateRevealTextFromClock();
-  startReveal(millis());
+
+  // Update the time text from the clock
+  updateTimeTextFromClock();
+
+  // Start the time overlay
+  startTimeOverlay(millis());
 }
