@@ -21,8 +21,8 @@ Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 Adafruit_FT6206 ctp;
 
 // Screen dimensions - portrait
-const int SCREEN_W = 320;
-const int SCREEN_H = 240;
+const int SCREEN_W = 240;
+const int SCREEN_H = 320;
 
 // Text scale
 const int TEXT_SCALE = 1;
@@ -224,14 +224,16 @@ void setup() {
   Serial.println("FT6206 touchscreen initialized successfully.");
 
   // Set up text parameters for digital rain
-  tft.fillScreen(ILI9341_BLACK);
   tft.setTextSize(TEXT_SCALE);
   tft.setTextWrap(false);
 
-  // Colors for digital rain (head + trail levels)
-  matrixBgColor = ILI9341_BLACK;
+  // Initialize color schemes and apply the first color scheme
   initColorSchemes();
   applyColorScheme(0);
+
+  // Set the background color
+  matrixBgColor = ILI9341_BLACK;
+  tft.fillScreen(matrixBgColor);
 
   // Set initial time
   rtc.setTime(0, 0, 12, 1, 1, 2024);
