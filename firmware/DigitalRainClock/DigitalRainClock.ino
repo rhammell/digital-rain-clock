@@ -101,6 +101,19 @@ const int COLOR_TOGGLE_REGION_H = 60;
 const uint16_t COLOR_TOGGLE_DEBOUNCE_MS = 250;
 uint32_t lastColorToggleMs = 0;
 
+// Brightness toggle region (upper right)
+const int BRIGHTNESS_TOGGLE_REGION_W = 60;
+const int BRIGHTNESS_TOGGLE_REGION_H = 60;
+const uint16_t BRIGHTNESS_TOGGLE_DEBOUNCE_MS = 250;
+uint32_t lastBrightnessToggleMs = 0;
+
+// Brightness levels
+const uint8_t BRIGHTNESS_LEVELS[] = {20, 40, 60, 80, 100};
+const uint8_t NUM_BRIGHTNESS_LEVELS = sizeof(BRIGHTNESS_LEVELS) / sizeof(BRIGHTNESS_LEVELS[0]);
+
+// Current brightness index - default to 100%
+uint8_t currentBrightnessIndex = NUM_BRIGHTNESS_LEVELS - 1;
+
 // Settings toggle region
 const int SETTINGS_TOGGLE_REGION_W = 60;
 const int SETTINGS_TOGGLE_REGION_H = 60;
@@ -186,15 +199,18 @@ void drawTimeAdjustControls();
 void updateSettingsTimeDisplay();
 void drawButton(int x, int y, int w, int h, const char *label);
 bool pointInRect(int x, int y, int rx, int ry, int rw, int rh);
+bool isBrightnessToggleTouch(int x, int y);
+void cycleBrightness();
+void applyBrightnessIndex(uint8_t idx);
 
 void setup() {
   // Initialize serial communication
   Serial.begin(115200);
   Serial.println("Starting TFT and Touch Initialization...");
  
-  // Backlight control
+  // Backlight control (PWM for brightness)
   pinMode(TFT_LED, OUTPUT);
-  digitalWrite(TFT_LED, HIGH);
+  applyBrightnessIndex(currentBrightnessIndex);
 
   // TFT Display Setup
   tft.begin();
@@ -620,6 +636,29 @@ bool pointInRect(int x, int y, int rx, int ry, int rw, int rh) {
   return (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh);
 }
 
+// Brightness toggle check (upper right region)
+bool isBrightnessToggleTouch(int x, int y) {
+  return (x >= (SCREEN_W - BRIGHTNESS_TOGGLE_REGION_W)) &&
+         (y <= BRIGHTNESS_TOGGLE_REGION_H);
+}
+
+// Apply brightness by index into BRIGHTNESS_LEVELS
+void applyBrightnessIndex(uint8_t idx) {
+  if (idx >= NUM_BRIGHTNESS_LEVELS) {
+    idx = NUM_BRIGHTNESS_LEVELS - 1;
+  }
+  currentBrightnessIndex = idx;
+  uint8_t percent = BRIGHTNESS_LEVELS[currentBrightnessIndex];
+  uint16_t duty = (uint16_t)percent * 255 / 100;
+  analogWrite(TFT_LED, duty);
+}
+
+// Cycle brightness to the next preset level
+void cycleBrightness() {
+  uint8_t next = (currentBrightnessIndex + 1) % NUM_BRIGHTNESS_LEVELS;
+  applyBrightnessIndex(next);
+}
+
 // Handle settings touch
 void handleSettingsTouch(int x, int y) {
   // Get the current time
@@ -824,6 +863,15 @@ void handleTouch() {
   // Map touch coordinates to the screen coordinates
   int touchX = map(p.x, 0, 240, 240, 0); 
   int touchY = map(p.y, 0, 320, 320, 0);
+
+  // Brightness toggle (upper right)
+  if (isBrightnessToggleTouch(touchX, touchY)) {
+    if (now - lastBrightnessToggleMs > BRIGHTNESS_TOGGLE_DEBOUNCE_MS) {
+      cycleBrightness();
+      lastBrightnessToggleMs = now;
+    }
+    return;
+  }
 
   // Check if the touch is in the settings toggle region and if the last settings toggle press was less than the debounce time
   if (isSettingsToggleTouch(touchX, touchY)) {
